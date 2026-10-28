@@ -1,36 +1,327 @@
-# This is a basic workflow to help you get started with Actions
-
-name: CI
-
-# Controls when the workflow will run
+name: build
 on:
-  # Triggers the workflow on push or pull request events but only for the "main" branch
   push:
-    branches: [ "main" ]
-  pull_request:
-    branches: [ "main" ]
-
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
-
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
-  # This workflow contains a single job called "build"
   build:
-    # The type of runner that the job will run on
-    runs-on: ubuntu-latest
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
+    runs-on: ubuntu-24.04
     steps:
-      # Checks-out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - uses: actions/checkout@v4
-
-      # Runs a single command using the runners shell
-      - name: Run a one-line script
-        run: echo Hello, world!
-
-      # Runs a set of commands using the runners shell
-      - name: Run a multi-line script
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: 21
+      - name: Install Gradle 8.8
         run: |
-          echo Add other actions to build,
-          echo test, and deploy your project.
+          curl -sL https://services.gradle.org/distributions/gradle-8.8-bin.zip -o /tmp/gradle.zip
+          unzip -q /tmp/gradle.zip -d "$HOME"
+          echo "$HOME/gradle-8.8/bin" >> "$GITHUB_PATH"
+      - name: Create project files
+        run: |
+          set -e
+          cat > build.gradle <<'EMBER_EOF'
+          plugins {
+              id 'fabric-loom' version '1.7-SNAPSHOT'
+              id 'maven-publish'
+          }
+
+          version = project.mod_version
+          group = project.maven_group
+
+          base {
+              archivesName = project.archives_base_name
+          }
+
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+          }
+
+          processResources {
+              inputs.property "version", project.version
+              filesMatching("fabric.mod.json") {
+                  expand "version": project.version
+              }
+          }
+
+          tasks.withType(JavaCompile).configureEach {
+              it.options.release = 21
+          }
+
+          java {
+              withSourcesJar()
+              sourceCompatibility = JavaVersion.VERSION_21
+              targetCompatibility = JavaVersion.VERSION_21
+          }
+          EMBER_EOF
+          cat > gradle.properties <<'EMBER_EOF'
+          org.gradle.jvmargs=-Xmx1G
+          org.gradle.parallel=true
+          minecraft_version=1.21.1
+          yarn_mappings=1.21.1+build.3
+          loader_version=0.16.5
+          mod_version=1.0.0
+          maven_group=com.emberquest
+          archives_base_name=emberquest
+          fabric_version=0.102.0+1.21.1
+          EMBER_EOF
+          cat > settings.gradle <<'EMBER_EOF'
+          pluginManagement {
+              repositories {
+                  maven { name = 'Fabric'; url = 'https://maven.fabricmc.net/' }
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          EMBER_EOF
+          mkdir -p src/main/java/com/emberquest
+          cat > src/main/java/com/emberquest/EmberBladeItem.java <<'EMBER_EOF'
+          package com.emberquest;
+
+          import net.minecraft.entity.LivingEntity;
+          import net.minecraft.entity.player.PlayerEntity;
+          import net.minecraft.item.Item;
+          import net.minecraft.item.ItemStack;
+          import net.minecraft.item.SwordItem;
+          import net.minecraft.item.ToolMaterial;
+          import net.minecraft.item.tooltip.TooltipType;
+          import net.minecraft.network.packet.s2c.play.EntityVelocityUpdateS2CPacket;
+          import net.minecraft.particle.ParticleTypes;
+          import net.minecraft.server.network.ServerPlayerEntity;
+          import net.minecraft.server.world.ServerWorld;
+          import net.minecraft.sound.SoundCategory;
+          import net.minecraft.sound.SoundEvents;
+          import net.minecraft.text.Text;
+          import net.minecraft.util.Formatting;
+          import net.minecraft.util.Hand;
+          import net.minecraft.util.TypedActionResult;
+          import net.minecraft.util.math.Vec3d;
+          import net.minecraft.world.World;
+
+          import java.util.List;
+
+          public class EmberBladeItem extends SwordItem {
+              private static final double DASH_POWER = 1.6;
+              private static final int COOLDOWN_TICKS = 80; // 4 seconds
+              private static final int BURN_SECONDS = 4;
+
+              public EmberBladeItem(ToolMaterial material, Item.Settings settings) {
+                  super(material, settings);
+              }
+
+              // Left-click: ignite the target.
+              @Override
+              public boolean postHit(ItemStack stack, LivingEntity target, LivingEntity attacker) {
+                  target.setOnFireFor(BURN_SECONDS);
+                  return super.postHit(stack, target, attacker);
+              }
+
+              // Right-click: Fire Dash.
+              @Override
+              public TypedActionResult<ItemStack> use(World world, PlayerEntity user, Hand hand) {
+                  ItemStack stack = user.getStackInHand(hand);
+                  if (user.getItemCooldownManager().isCoolingDown(this)) {
+                      return TypedActionResult.pass(stack);
+                  }
+
+                  if (!world.isClient) {
+                      Vec3d look = user.getRotationVector();
+                      user.setVelocity(look.x * DASH_POWER, Math.max(look.y * DASH_POWER * 0.5, 0.2), look.z * DASH_POWER);
+                      user.velocityModified = true;
+                      user.fallDistance = 0.0F;
+                      if (user instanceof ServerPlayerEntity serverPlayer) {
+                          serverPlayer.networkHandler.sendPacket(new EntityVelocityUpdateS2CPacket(user));
+                      }
+                      ((ServerWorld) world).spawnParticles(ParticleTypes.FLAME,
+                              user.getX(), user.getBodyY(0.5), user.getZ(), 25, 0.3, 0.3, 0.3, 0.05);
+                      world.playSound(null, user.getBlockPos(), SoundEvents.ITEM_FIRECHARGE_USE,
+                              SoundCategory.PLAYERS, 1.0F, 1.0F);
+                      stack.damage(2, user, LivingEntity.getSlotForHand(hand));
+                  }
+
+                  user.getItemCooldownManager().set(this, COOLDOWN_TICKS);
+                  return TypedActionResult.success(stack, world.isClient());
+              }
+
+              @Override
+              public void appendTooltip(ItemStack stack, Item.TooltipContext context, List<Text> tooltip, TooltipType type) {
+                  tooltip.add(Text.translatable("tooltip.emberquest.ember_blade.1").formatted(Formatting.GOLD));
+                  tooltip.add(Text.translatable("tooltip.emberquest.ember_blade.2").formatted(Formatting.GRAY));
+              }
+          }
+          EMBER_EOF
+          mkdir -p src/main/java/com/emberquest
+          cat > src/main/java/com/emberquest/EmberMaterial.java <<'EMBER_EOF'
+          package com.emberquest;
+
+          import net.minecraft.block.Block;
+          import net.minecraft.item.ToolMaterial;
+          import net.minecraft.recipe.Ingredient;
+          import net.minecraft.registry.tag.BlockTags;
+          import net.minecraft.registry.tag.TagKey;
+
+          public enum EmberMaterial implements ToolMaterial {
+              INSTANCE;
+
+              @Override public int getDurability() { return 1200; }
+              @Override public float getMiningSpeedMultiplier() { return 7.0F; }
+              @Override public float getAttackDamage() { return 3.0F; }
+              @Override public TagKey<Block> getInverseTag() { return BlockTags.INCORRECT_FOR_DIAMOND_TOOL; }
+              @Override public int getEnchantability() { return 18; }
+              @Override public Ingredient getRepairIngredient() { return Ingredient.ofItems(ModItems.EMBER_SHARD); }
+          }
+          EMBER_EOF
+          mkdir -p src/main/java/com/emberquest
+          cat > src/main/java/com/emberquest/EmberQuest.java <<'EMBER_EOF'
+          package com.emberquest;
+
+          import net.fabricmc.api.ModInitializer;
+
+          public class EmberQuest implements ModInitializer {
+              public static final String MOD_ID = "emberquest";
+
+              @Override
+              public void onInitialize() {
+                  ModItems.init();
+              }
+          }
+          EMBER_EOF
+          mkdir -p src/main/java/com/emberquest
+          cat > src/main/java/com/emberquest/ModItems.java <<'EMBER_EOF'
+          package com.emberquest;
+
+          import net.fabricmc.fabric.api.itemgroup.v1.ItemGroupEvents;
+          import net.minecraft.item.Item;
+          import net.minecraft.item.ItemGroups;
+          import net.minecraft.item.SwordItem;
+          import net.minecraft.registry.Registries;
+          import net.minecraft.registry.Registry;
+          import net.minecraft.util.Identifier;
+          import net.minecraft.util.Rarity;
+
+          public class ModItems {
+              public static final Item EMBER_SHARD = register("ember_shard", new Item(new Item.Settings()));
+
+              public static final Item EMBER_BLADE = register("ember_blade",
+                      new EmberBladeItem(EmberMaterial.INSTANCE, new Item.Settings()
+                              .rarity(Rarity.RARE)
+                              .fireproof()
+                              .attributeModifiers(SwordItem.createAttributeModifiers(EmberMaterial.INSTANCE, 3, -2.4F))));
+
+              private static Item register(String name, Item item) {
+                  return Registry.register(Registries.ITEM, Identifier.of(EmberQuest.MOD_ID, name), item);
+              }
+
+              public static void init() {
+                  ItemGroupEvents.modifyEntriesEvent(ItemGroups.COMBAT).register(entries -> entries.add(EMBER_BLADE));
+                  ItemGroupEvents.modifyEntriesEvent(ItemGroups.INGREDIENTS).register(entries -> entries.add(EMBER_SHARD));
+              }
+          }
+          EMBER_EOF
+          mkdir -p src/main/resources/assets/emberquest/lang
+          cat > src/main/resources/assets/emberquest/lang/ar_sa.json <<'EMBER_EOF'
+          {
+            "item.emberquest.ember_blade": "نصل الجمر",
+            "item.emberquest.ember_shard": "شظية الجمر",
+            "tooltip.emberquest.ember_blade.1": "يُشعل الأعداء عند الضرب",
+            "tooltip.emberquest.ember_blade.2": "كليك يمين: اندفاعة نارية (تبريد 4 ثوانٍ)"
+          }
+          EMBER_EOF
+          mkdir -p src/main/resources/assets/emberquest/lang
+          cat > src/main/resources/assets/emberquest/lang/en_us.json <<'EMBER_EOF'
+          {
+            "item.emberquest.ember_blade": "Ember Blade",
+            "item.emberquest.ember_shard": "Ember Shard",
+            "tooltip.emberquest.ember_blade.1": "Ignites enemies on hit",
+            "tooltip.emberquest.ember_blade.2": "Right-click: Fire Dash (4s cooldown)"
+          }
+          EMBER_EOF
+          mkdir -p src/main/resources/assets/emberquest/models/item
+          cat > src/main/resources/assets/emberquest/models/item/ember_blade.json <<'EMBER_EOF'
+          { "parent": "minecraft:item/handheld", "textures": { "layer0": "emberquest:item/ember_blade" } }
+          EMBER_EOF
+          mkdir -p src/main/resources/assets/emberquest/models/item
+          cat > src/main/resources/assets/emberquest/models/item/ember_shard.json <<'EMBER_EOF'
+          { "parent": "minecraft:item/generated", "textures": { "layer0": "emberquest:item/ember_shard" } }
+          EMBER_EOF
+          mkdir -p src/main/resources/data/emberquest/recipe
+          cat > src/main/resources/data/emberquest/recipe/ember_blade.json <<'EMBER_EOF'
+          {
+            "type": "minecraft:crafting_shaped",
+            "category": "equipment",
+            "pattern": [ "E", "E", "S" ],
+            "key": { "E": { "item": "emberquest:ember_shard" }, "S": { "item": "minecraft:stick" } },
+            "result": { "id": "emberquest:ember_blade", "count": 1 }
+          }
+          EMBER_EOF
+          mkdir -p src/main/resources/data/emberquest/recipe
+          cat > src/main/resources/data/emberquest/recipe/ember_shard.json <<'EMBER_EOF'
+          {
+            "type": "minecraft:crafting_shapeless",
+            "category": "misc",
+            "ingredients": [ { "item": "minecraft:blaze_rod" }, { "item": "minecraft:magma_cream" } ],
+            "result": { "id": "emberquest:ember_shard", "count": 2 }
+          }
+          EMBER_EOF
+          mkdir -p src/main/resources
+          cat > src/main/resources/fabric.mod.json <<'EMBER_EOF'
+          {
+            "schemaVersion": 1,
+            "id": "emberquest",
+            "version": "${version}",
+            "name": "Ember Quest",
+            "description": "A lightweight RPG weapon mod: the Ember Blade ignites enemies and lets you Fire Dash.",
+            "authors": ["You"],
+            "license": "MIT",
+            "environment": "*",
+            "entrypoints": {
+              "main": ["com.emberquest.EmberQuest"]
+            },
+            "depends": {
+              "fabricloader": ">=0.16.0",
+              "minecraft": "~1.21.1",
+              "java": ">=21",
+              "fabric-api": "*"
+            }
+          }
+          EMBER_EOF
+          mkdir -p src/main/resources/assets/emberquest/textures/item
+          cat > make_textures.py <<'EMBER_EOF'
+          import zlib, struct
+          R='src/main/resources/assets/emberquest/textures/item/'
+          def save(path, grid):
+              raw=b''.join(b'\x00'+b''.join(bytes(grid[y][x]) for x in range(16)) for y in range(16))
+              def ch(t,d):
+                  c=struct.pack('>I',len(d))+t+d
+                  return c+struct.pack('>I',zlib.crc32(t+d)&0xffffffff)
+              open(path,'wb').write(b'\x89PNG\r\n\x1a\n'+ch(b'IHDR',struct.pack('>IIBBBBB',16,16,8,6,0,0,0))+ch(b'IDAT',zlib.compress(raw))+ch(b'IEND',b''))
+          T=(0,0,0,0)
+          g=[[T]*16 for _ in range(16)]
+          for i in range(5,15):
+              g[15-i][i]=(255,170,30,255)
+              g[15-i][i-1]=(200,70,10,255)
+              if i>5: g[15-i][i+1 if i+1<16 else i]=(255,220,90,255)
+          g[0][15]=(255,240,150,255)
+          for d in range(-2,3):
+              x,y=4+d,11+d
+              if 0<=x<16 and 0<=y<16: g[y][x]=(80,80,80,255)
+          for i in range(1,4): g[15-i][i]=(110,60,20,255)
+          g[15][0]=(70,40,10,255)
+          save(R+'ember_blade.png',g)
+          s=[[T]*16 for _ in range(16)]
+          for y in range(16):
+              for x in range(16):
+                  d=abs(x-7.5)+abs(y-7.5)
+                  if d<=5: s[y][x]=(255,150,20,255)
+                  if d<=3: s[y][x]=(255,210,60,255)
+                  if d<=1.5: s[y][x]=(255,250,190,255)
+          save(R+'ember_shard.png',s)
+          EMBER_EOF
+          python3 make_textures.py
+      - name: Build
+        run: gradle build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: emberquest-jar
+          path: build/libs/*.jar
