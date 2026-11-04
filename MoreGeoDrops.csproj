@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net472</TargetFramework>
+    <AssemblyName>MoreGeoDrops</AssemblyName>
+    <LangVersion>latest</LangVersion>
+    <GamePath>C:\Program Files (x86)\Steam\steamapps\common\Hollow Knight\hollow_knight_Data\Managed</GamePath>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="Assembly-CSharp"><HintPath>$(GamePath)\Assembly-CSharp.dll</HintPath></Reference>
+    <Reference Include="UnityEngine"><HintPath>$(GamePath)\UnityEngine.dll</HintPath></Reference>
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(GamePath)\UnityEngine.CoreModule.dll</HintPath></Reference>
+    <Reference Include="MMHOOK_Assembly-CSharp"><HintPath>$(GamePath)\MMHOOK_Assembly-CSharp.dll</HintPath></Reference>
+    <Reference Include="MonoMod.RuntimeDetour"><HintPath>$(GamePath)\MonoMod.RuntimeDetour.dll</HintPath></Reference>
+    <Reference Include="MonoMod.Utils"><HintPath>$(GamePath)\MonoMod.Utils.dll</HintPath></Reference>
+  </ItemGroup>
+</Project>
